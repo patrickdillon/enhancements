@@ -9,7 +9,7 @@ approvers: # A single approver is preferred, the role of the approver is to rais
 api-approvers: # In case of new or modified APIs or API extensions (CRDs, aggregated apiservers, webhooks, finalizers). If there is no API change, use "None"
   - "None"
 creation-date: 2024-07-12
-last-updated: 2024-07-12
+last-updated: 2024-10-14
 tracking-link: # link to the tracking ticket (for example: Jira Feature or Epic ticket) that corresponds to this enhancement
   - "SPSTRAT-271"
 see-also:
@@ -17,150 +17,128 @@ replaces:
 superseded-by:
 ---
 
-# RHCOS Cloud-Marketplace Images
+# Cloud-Marketplace Images in the RHCOS Stream
 
 ## Summary
 
-This enhancement proposes a process to upload/publish
-cloud (AWS, Azure, & GCP) marketplace images and include
-the image details in the RHCOS stream.
+This enhancement proposes a process for including cloud (AWS, Azure, & GCP)
+marketplace images in the coreos stream. RHCOS tooling (`plume cosa2stream`
+and, perhaps, `stream-metadata-go`) would be updated to find the latest available 
+marketplace images and include them in the stream.
+
+By using a process of discovery for marketplace images during the RHCOS stream generation
+the publication of the image is decoupled from the build. The result would be
+that the generated RHCOS stream will always include the most recent marketplace images.
+Practically speaking, this means that during the initial bump for a new RHCOS build the
+generated stream would continue to use the previous marketplace images. The
+same stream generation command would be rerun to update the marketplace images
+as they become available. 
+
+In order to include a marketplace image, criteria would need to be defined in order
+to select the images via the cloud API. A concrete implementation for extending
+`plume cosa2stream` to update Azure marketplace images is presented, with the
+intention that this will provide the groundwork for other cloud marketplaces.
+
 
 ## Motivation
 
-Publishing marketplace versions in the RHCOS stream will
-improve user experience and relieve tech debt:
+Marketplace images are officially supported, but are not
+included in the RHCOS stream, which is the canonical source
+for images. This omission results in a degraded experience
+for both users and developers:
 
-* Marketplace images published as part of Project Stratosphere are incomplete, requiring users to use
-boot images from previous releases, which slows
-down machine provisioning.
 * As marketplace images are not included in the coreos
 stream, users must manually enter the image details.
 With these changes, the experience will be improved
 so that users can simply indicate they want to use
-marketplace images and the installer will select the
-appropriate image.
-* Publishing a free Azure marketplace image would
-significantly decrease Azure installation times &
-would unblock Azure hosted control planes. On Azure, marketplace
-images are the only globally available, production-ready API for
-publishing images. Currently, every install creates a managed image
-utilizing the 16GB VHD file found in the RHCOS stream. Publishing
-an image would immediately save time during installs, reduce
-installer code maintenance, and reduce cluster cost.
+marketplace images in the install config and the installer
+will select the appropriate image.
+* On Azure, marketplace images are the preferred (and,
+in the case of ARO, only supported) method for distributing
+production-grade images. Including these images in the stream
+would allow the installer to undo the workarounds required for
+non-marketplace images and thereby dramatically speed up installs;
+as well as, unblocking ARO HCP.
+* Integrating ROSA marketplace images (which this enhancement enables
+but does not achieve) into the stream would unblock ROSA CI
 
 ### User Stories
 
-* As an OpenShift cluster admin, I want to specify
-a boolean value for marketplace images in the install
-config so that I can utilize marketplace images without
-looking up specific version numbers.
+* As an OpenShift developer, I want RHCOS marketplace images to be included in the stream,
+so I can use them in my application.
+* As an `openshif-install` user, I want to specify a boolean value for marketplace images in
+the install config so that I can utilize marketplace images without looking up specific version numbers.
 
 ### Goals
 
-* A well-defined process for publishing cloud marketplace
-images and including them in the RHCOS stream.
-* Setup non-paid Azure marketplace offering: determine publisher
-* Definition in RHCOS stream to separate multiple similar offers (e.g. ROSA-specific marketplace images vs.
-OpenShift AWS marketplace images, Azure paid vs. free images)
+* A well defined standard pattern for including marketplace images, published out-of-band, in the RHCOS streams.
+* Provide an example Azure implementation that will scale to other clouds
 
 ### Non-Goals
 
-TBD
+* To determine the publication process for marketplace images.
+* Future work: define the install-config API for using marketplace images
 
 ## Proposal
-
-This enhancement proposes a process for publishing the images and
-a specification for how the images would be published in the stream.
-
-The process for uploading images will be based on RHCOS stream bump
-PRs. New PRs to the installer will trigger a request to upload images.
-When the images are available, the PR will be merged to update the stream.
 
 Marketplace images will be included in the
 `.architectures[("aarch64","x86_64")].rhel_coreos_extensions` fields. 
 
+In order to populate the stream, the RHCOS tooling (such as `plume`) would be extended
+to query the cloud API (`plume` is already setup to utilize these APIs) to
+find the marketplace images based on criteria defined for that particular image. If a
+marketplace image is found that matches the version of the release being generated,
+it is used in the stream. If not, fall back to the most recent version available.
+
+The marketplace image bumps will lag behind the initial image bumps, so the first
+bump for version `x.y.z` will (typically) include marketplace images at `x.y.z-1`. #TODO: this is enforced by convention
+Once marketplace images are available, the command can be rerun to bump marketplace
+images to `x.y.z`. See the open question below about whether this pattern is unacceptable
+to `plume cosa2stream`'s idempotency guarantees.
 
 ### Workflow Description
 
-The workflow for uploading cloud marketplace images is a
-pull-request-based workflow; the uploading of marketplace
-images will be initiated by a pull request bumping the RHCOS
-stream in the installer.
 
-**pull request** is a pull request, opened by an RHCOS engineer,
-bumping the RHCOS stream in openshift/installer. The bump
-is based 
-
-**software production** is the team of engineers who perform
-the marketplace image uploads.
-
-**cloud marketplaces** are AWS, Azure & GCP.
-
-```mermaid
-sequenceDiagram
-  participant PR as Pull Request
-  actor SP as Software Production
-  participant CM as Cloud Marketplaces
-
-  PR->>SP: When the pull request is opened, a JIRA ticket is generated and assigned to Software Production.
-  PR->>PR: E2E tests fail as marketplace images are not found
-  SP->>CM: Upload RHCOS images to cloud marketplaces
-  CM->>SP: Images are available
-  SP->>PR: JIRA ticket is closed
-  PR->>PR: Tests Pass
+**cosa2stream command** is the specific invocation of the plume command, for example:
 ```
+plume cosa2stream --target data/data/coreos/rhcos.json                \
+    --distro rhcos --no-signatures --name 4.18-9.4                    \
+    --url https://rhcos.mirror.openshift.com/art/storage/prod/streams \
+    x86_64=418.94.202410090804-0                                      \
+    aarch64=418.94.202410090804-0                                     \
+    s390x=418.94.202410090804-0                                       \
+    ppc64le=418.94.202410090804-0
+```
+
+**RHCOS engineer** a member of the RHCOS team
+
+**OpenShift engineer** a member of any openshift engineering team
+
+1. **RHCOS engineer** runs the **cosa2stream command** to generate `rhcos.json` for a release.
+All of the non-marketplace images have been created for the release `x.y.z` and are populated
+in the stream, but new marketplace images have not yet been created, so the previous release
+`x.y.z-1` marketplace images are still used to populate the stream for marketplace images.
+2. **RHCOS engineer** opens a PR against the installer, which is CI tested, and merged.
+3. (orthogonal) A notification is generated for marketplace publishers, who upload
+images based on the new `rhcos.json` to their respective cloud marketplaces.
+4. **OpenShift engineer** reruns the same **cosa2stream command** for the `x.y.z` release. Now
+that cloud images have been uploaded to the marketplace, the marketplace images are updated to
+release `x.y.z` while the rest of `rhcos.json` is not updated.
+5. Profit
+
 
 ### API Extensions
 
-Machine pools in the install config would be updated to allow users to more simply
-opt in to using marketplace images without specifying particular image details.
-
-#### Azure
-
-Currently in Azure, to use paid marketplace images, [users consult
-documentation to determine image details](https://docs.openshift.com/container-platform/4.16/installing/installing_azure/installing-azure-customizations.html#installation-azure-marketplace-subscribe_installing-azure-customizations)
-and enter image details in the install config like this:
-
-```yaml
-compute:
-- name: worker
-  platform:
-    azure:
-      osImage:
-        publisher: RedHat
-        offer: rh-ocp-worker
-        sku: rh-ocp-worker
-        version: 413.92.2023101700
-```
-
-A `marketplaceImage` field would be added (OPEN QUESTION: either as a child of `osImage` or as a sibling)
-with the following enum values:
-
-* `NoPurchasePlan` - equivalent to a standard Azure OpenShift install, except under the
-hood we switch the use of the managed image with a non-paid OpenShift image
-* `PurchasePlanNorthAmerica` - equivalent to the yaml snippet directly preceding this
-* `PurchasePlanEMEA` - for users in EMEA, selects marketplace images from the `redhat-limited` publisher
-
-See implementation details below for how these install config values would be translated into selecting
-images from the RHCOS stream.
-
-#### AWS
-
-TODO
-
-#### GCP
-
-TODO
+Once marketplace images are included in the stream, machine pools in the install config would be
+updated to allow users to more simply opt in to using marketplace images without specifying particular image details.
+The details of that will be discussed separately in order to keep focus on the RHCOS stream.
 
 ### Topology Considerations
 
 #### Hypershift / Hosted Control Planes
 
 ROSA and ARO both make use of marketplace images. ARO HCP depend on the
-availability of Azure marketplace images. It is an Open Question as to whether
-ARO requires a set of Azure marketplace images that is distinct from typical
-Azure OpenShift images.
-
+availability of Azure marketplace images. 
 #### Standalone Clusters
 
 Standalone Azure clusters will have a faster installation time as they will no
@@ -186,43 +164,26 @@ region to image mappings
 * `rhel-coreos-extensions` (optional): is an extensible object, where the
 only current value is `azure-disk`
 
-#### Azure
-
-In Azure, OpenShift currently publishes *paid* marketplace images
-(which are not published in the RHCOS stream). So we need to add an
-additional free marketplace image, as well as publishing those in
-the stream.
+Marketplace images would be added to `rhel-coreos-extensions`. Below is an implementation for Azure images.
+Other clouds would be implemented at the same level.
 
 ##### Azure Marketplace Images
 
-Using the [commands from our docs](https://docs.openshift.com/container-platform/4.16/installing/installing_azure/installing-azure-customizations.html#installation-azure-marketplace-subscribe_installing-azure-customizations), we can see the current marketplace images:
+Paid Azure marketplace images would be used from the publisher `redhat`. Non-paid images will be used from the publisher
+`azureopenshift`. Note that these criteria values would be in the RHCOS tooling and could be updated when needed.
+
+Here is an imaginary, simplified example of output using the `az` cli to inspect 4.18 non-paid images:
 
 ```shell
-$  az vm image list --all --offer rh-ocp-worker --publisher redhat -o table
-Architecture    Offer          Publisher       Sku                 Urn                                                                Version
---------------  -------------  --------------  ------------------  -----------------------------------------------------------------  -----------------
-x64             rh-ocp-worker  RedHat          rh-ocp-worker       RedHat:rh-ocp-worker:rh-ocp-worker:4.8.2021122100                  4.8.2021122100
-x64             rh-ocp-worker  RedHat          rh-ocp-worker       RedHat:rh-ocp-worker:rh-ocp-worker:413.92.2023101700               413.92.2023101700
-x64             rh-ocp-worker  redhat-limited  rh-ocp-worker       redhat-limited:rh-ocp-worker:rh-ocp-worker:4.8.2021122100          4.8.2021122100
-x64             rh-ocp-worker  redhat-limited  rh-ocp-worker       redhat-limited:rh-ocp-worker:rh-ocp-worker:413.92.2023101700       413.92.2023101700
-x64             rh-ocp-worker  RedHat          rh-ocp-worker-gen1  RedHat:rh-ocp-worker:rh-ocp-worker-gen1:4.8.2021122100             4.8.2021122100
-x64             rh-ocp-worker  RedHat          rh-ocp-worker-gen1  RedHat:rh-ocp-worker:rh-ocp-worker-gen1:413.92.2023101700          413.92.2023101700
-x64             rh-ocp-worker  redhat-rhel     rh-ocp-worker       redhat-rhel:rh-ocp-worker:rh-ocp-worker:4.13.2023101100            4.13.2023101100
-x64             rh-ocp-worker  redhat-limited  rh-ocp-worker-gen1  redhat-limited:rh-ocp-worker:rh-ocp-worker-gen1:4.8.2021122100     4.8.2021122100
-x64             rh-ocp-worker  redhat-limited  rh-ocp-worker-gen1  redhat-limited:rh-ocp-worker:rh-ocp-worker-gen1:413.92.2023101700  413.92.2023101700
-x64             rh-ocp-worker  redhat-rhel     rh-ocp-worker-gen1  redhat-rhel:rh-ocp-worker:rh-ocp-worker-gen1:4.13.2023101100       4.13.2023101100
+$ az vm image list --publisher azureopenshift --offer aro4  --all -o table --sku 418
+Architecture    Offer    Publisher       Sku      Urn                                                Version
+--------------  -------  --------------  -------  -------------------------------------------------  ---------------------
+Arm64           aro4     azureopenshift  418-arm  azureopenshift:aro4:418-arm:418.94.202410090804-0  418.94.202410090804-0
+x64             aro4     azureopenshift  418-v2   azureopenshift:aro4:418-v2:418.94.202410090804-0   418.94.202410090804-0
+x64             aro4     azureopenshift  aro_418  azureopenshift:aro4:aro_418:418.94.202410090804-0  418.94.202410090804-0
 ```
 
-Images from the `redhat-limited` publisher are for EMEA while `RedHat` is for North America. Free marketplace images could be published under
-a new offer, such as: `RHCOS`, `OpenShift` or, keeping in line with the current convention, `rh-ocp`, such that the listing would look like:
-
-```shell
-$  az vm image list --all --offer rhcos --publisher redhat -o table
-Architecture    Offer          Publisher       Sku                 Urn                                          Version
---------------  -------------  --------------  ------------------  -------------------------------------------  -----------------
-x64             rhcos          RedHat          rhcos               RedHat:rhcos:rhcos:417.94.202407010929       417.94.202407010929
-x64             rhcos          RedHat          rhcos-gen1          RedHat:rhcos:rhcos-gen1:417.94.202407010929  417.94.202407010929
-```
+The `offer` and `publisher` are static values. `Sku` is variable, but deterministic based on the release inputs
 
 ##### Azure Stream Representation
 
@@ -232,27 +193,27 @@ marketplace images listed as child objects:
 ```yaml
 "rhel-coreos-extensions": {
   "azure-disk": {
-    "release": "417.94.202407010929-0",
-    "url": "https://rhcos.blob.core.windows.net/imagebucket/rhcos-417.94.202407010929-0-azure.x86_64.vhd"
+    "release": "418.94.202410090804-0",
+    "url": "https://rhcos.blob.core.windows.net/imagebucket/rhcos-418.94.202410090804-0-azure.x86_64.vhd"
   },
   "azure-marketplace": {
     "no-purchase-plan": {
       "publisher": "RedHat",
       "offer": "rhcos",
       "sku": "rhcos",
-      "version": "417.94.202407010929"
+      "version": "418.94.202410090804"
     },
     "purchase-plan-north-america": {
       "publisher": "RedHat",
       "offer": "rh-ocp-worker",
       "sku": "rh-ocp-worker",
-      "version": "417.94.202407010929"
+      "version": "418.94.202410090804"
     },
     "purchase-plan-emea": {
       "publisher": "redhat-limited",
       "offer": "rh-ocp-worker",
       "sku": "rh-ocp-worker",
-      "version": "417.94.202407010929"
+      "version": "418.94.202410090804"
     }
   }
 ```
@@ -261,17 +222,6 @@ marketplace images listed as child objects:
 would be published, identified by a `gen1` suffix, but would not be included in the RHCOS stream. Any time that the installer
 or users need to select a gen1 image, they would simply add the `gen1` suffix to the SKU identified in the RHCOS stream.  
 
-OPEN QUESTION: How to handle EMEA vs North America 
-OPEN QUESTION: how to handle azure gen1 image
-
-#### AWS
-
-TODO 
-- AWS marketplace images are region-specific. Does it also make sense to include them in the extension?
-
-#### GCP
-
-TODO
 
 ### Risks and Mitigations
 
@@ -283,7 +233,10 @@ TODO
 
 ## Open Questions [optional]
 
-TODO
+`plume cosa2stream` is idempotent. I believe the changes proposed here are sufficient for the idempotency guarantee,
+but the values for marketplace images would change based on the availability of those images. So the same command
+run at two different times would produce different results--but invoking the command multiple times would never
+cause any problems.
 
 ## Test Plan
 
@@ -323,7 +276,13 @@ TODO
 
 ## Alternatives
 
-Investigate installers ability to search marketplace for latest images, and whether this is a viable alternative.
+Early feedback on this enhancement proposed splitting marketplace images into a separate file.
+Multiple files solves the issues regarding holding the initial bump PR to wait for marketplace
+images to be uploaded, but there are many assumptions throughout openshift that the stream is contained
+in a single file, such as `openshift-install coreos print-stream-json`, the 
+[coreos configmap manifest](https://github.com/openshift/installer/blob/master/hack/build-coreos-manifest.go),
+& perhaps more. I believe the current approach solves the problems we were trying to solve with this alternative
+but in a way that requires less reworking of existing code and keeps `rhcos.json` as a single canonical file.
 
 ## Infrastructure Needed [optional]
 
